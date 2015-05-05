@@ -7,4 +7,6 @@ handout.tex
 # Other junk
 .DS_Store
 /handout_cache/
-/handout.pdf
+/accre/accre-pull.sh
+/accre/accre-push.sh
+/clinton-2006/
