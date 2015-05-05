@@ -1,0 +1,213 @@
+---
+title: "Introduction to Parallel Computation in R"
+author: "Brenton Kenkel"
+date: "May 6, 2015"
+thanks: >
+  This document and all associated content are licensed under the [Creative Commons Attribution-ShareAlike License (v4.0)](http://creativecommons.org/licenses/by-sa/4.0/).  Source code is available at <https://github.com/brentonk/parallel-r-workshop>.  The document incorporates material from [Jonathan Olmsted's Advanced Statistical Programming Camp notes](http://olmjo.com/teaching/ASPC/).
+output:
+  pdf_document:
+    highlight: tango
+    template: template.tex
+    keep_tex: true
+    fig_caption: true
+---
+
+# Introduction
+
+# Running Example
+
+As a running example throughout the workshop, we'll be replicating part of the analysis in Josh Clinton's article ["Representation in Congress: Constituents and Roll Calls in the 106th House"](http://www.jstor.org/stable/10.1111/j.1468-2508.2006.00415.x) (*Journal of Politics*, 2006).  The paper is concerned with whether (and how) the preferences of the constituents in a Congress member's district affect her vote choices.  The part of the analysis we'll be replicating is summarized in Table 4 of the paper.  The analysis consists of running more than 800 logistic regression models, each with a different roll call vote as the dependent variable, on three covariates: an indicator for the member's party ID, the average ideology of the member's same-party constituents, and the average ideology of the member's different-party constituents.  The goal of the analysis is to track the number of models in which each covariate is statistically significant.
+
+![Table 4 from Clinton 2006, summarizing the analysis we'll be partially replicating.](clinton-table-4.pdf)
+
+You can download a cleaned-up version of Josh's data from my website in R data format:
+
+```{r load}
+load(url("http://bkenkel.com/data/clinton-jop.rda"))
+```
+
+The data file contains two objects, `house106` and `votes106`.  `house106` is a $`r nrow(house106)` \times `r ncol(house106)`$ data frame containing legislator characteristics—the independent variables in each of our logistic regression models.
+
+```{r describe-house}
+str(house106)
+```
+
+`votes106` is a $`r nrow(votes106)` \times `r ncol(votes106)`$ roll call matrix, where the $ij$'th entry gives legislator $i$'s vote on bill $j$.[^nvotes]
+
+[^nvotes]: To avoid being derailed by spurious warnings during the workshop, I removed votes for which there was separation in the corresponding logistic regression, so the number of votes analyzed is slightly smaller than in the original paper.
+
+```{r describe-votes}
+str(votes106)
+```
+
+So we're going to run `r ncol(votes106)` logits: one for each column of `votes106`, each with the three variables in `house106` as regressors.  As an example, let's do that with the first vote recorded in `votes106`.
+
+```{r first-logit}
+## Substitute given vote into member data
+house106$vote <- votes106[, 1]
+
+## Run logit of vote choice on member attributes
+logit_fit <- glm(vote ~ republican + prefs_same + prefs_nonsame,
+                 data = house106,
+                 family = binomial(link = "logit"))
+```
+
+# Preliminaries
+
+```{r packages, eval=FALSE}
+install.packages(c("microbenchmark", "foreach", "doParallel"))
+```
+
+## Functions
+
+```{r function}
+pval_by_vote <- function(vote, coefficient) {
+    ## Substitute given vote into member data
+    house106$vote <- votes106[, vote]
+
+    ## Run logit of vote choice on member attributes
+    logit_fit <- glm(vote ~ republican + prefs_same + prefs_nonsame,
+                     data = house106,
+                     family = binomial(link = "logit"))
+
+    ## Retrieve p-value
+    p_vals <- summary(logit_fit)$coef[, 4]
+    return(p_vals[coefficient])
+}
+```
+
+```{r function-test}
+pval_by_vote(vote = 10, coefficient = 2)
+```
+
+## Loops
+
+```{r for}
+p <- rep(NA, 5)
+for (i in 1:5) {
+    p[i] <- pval_by_vote(vote = i, coefficient = 2)
+}
+```
+
+```{r for-results}
+sum(p < 0.05)
+```
+
+```{r for-function}
+pvals_for <- function(votes, coefficient) {
+    p <- rep(NA, length(votes))
+    for (i in 1:length(votes)) {
+        p[i] <- pval_by_vote(vote = votes[i], coefficient = coefficient)
+    }
+    return(p)
+}
+```
+
+```{r for-function-results}
+sum(pvals_for(1:5, 2) < 0.05)
+```
+
+## Benchmarking
+
+```{r system-time-applied}
+system.time(pvals_for(1:5, 2))
+```
+
+```{r microbenchmark, cache=TRUE}
+library("microbenchmark")
+microbenchmark(five = pvals_for(1:5, 2),
+               ten = pvals_for(1:10, 2))
+```
+
+# From `for` to `foreach`
+
+```{r foreach}
+library("foreach")
+```
+
+```{r foreach-syntax}
+foreach (i = 1:5) %do% {
+    pval_by_vote(vote = i, coefficient = 2)
+}
+```
+
+```{r foreach-combine}
+foreach (i = 1:5, .combine = "c") %do% {
+    pval_by_vote(vote = i, coefficient = 2)
+}
+```
+
+```{r foreach-function}
+pvals_do <- function(votes, coefficient) {
+    foreach (i = votes, .combine = "c") %do% {
+        pval_by_vote(vote = i, coefficient = coefficient)
+    }
+}
+```
+
+```{r for-vs-do, cache=TRUE}
+microbenchmark(for_loop = pvals_for(1:5, 2),
+               do = pvals_do(1:5, 2))
+```
+
+
+# Local Parallelization
+
+```{r dopar-syntax}
+foreach (i = 1:5, .combine = "c") %dopar% {
+    pval_by_vote(vote = i, coefficient = 2)
+}
+```
+
+```{r dopar-function}
+pvals_dopar <- function(votes, coefficient) {
+    foreach (i = votes, .combine = "c") %dopar% {
+        pval_by_vote(vote = i, coefficient = coefficient)
+    }
+}
+```
+
+```{r dopar-setup}
+library("doParallel")
+cl <- makePSOCKcluster(2)
+registerDoParallel(cl)
+getDoParWorkers()
+```
+
+```{r cluster-export}
+clusterExport(cl, varlist = ls())
+```
+
+```{r small-test, cache=TRUE}
+microbenchmark(for_loop = pvals_for(1:5, 2),
+               do = pvals_do(1:5, 2),
+               dopar = pvals_dopar(1:5, 2))
+```
+
+```{r medium-test, cache=TRUE}
+cols <- 1:ncol(votes106)
+system.time(p_do <- pvals_do(cols, 2))
+system.time(p_dopar <- pvals_dopar(cols, 2))
+```
+
+```{r check-equality}
+all.equal(p_do, p_dopar)
+```
+
+```{r get-answer}
+sum(p_dopar < 0.05)
+```
+
+```{r big-test, cache=TRUE}
+system.time(for (j in 1:4) pvals_for(cols, j))
+system.time(foreach (j = 1:4) %dopar% pvals_for(cols, j))
+```
+
+```{r stop-cluster}
+stopCluster(cl)
+```
+
+## For Mac and Linux Users: An Easier Way
+
+
+# Remote Parallelization

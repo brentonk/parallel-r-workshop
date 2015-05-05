@@ -1,0 +1,10 @@
+# Outside resources
+resources/
+
+# Intermediate LaTeX output
+handout.tex
+
+# Other junk
+.DS_Store
+/handout_cache/
+/handout.pdf
